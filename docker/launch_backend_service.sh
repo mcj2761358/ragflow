@@ -18,25 +18,52 @@ load_env_file() {
         set +a
     else
         echo "Warning: .env file not found at: $env_file"
+        echo "Using default environment variables..."
+        # 设置默认环境变量
+        export MYSQL_PASSWORD=ragflow
+        export MINIO_USER=ragflow
+        export MINIO_PASSWORD=ragflow
+        export REDIS_PASSWORD=ragflow
+        # 其他必要的环境变量可以在这里添加
     fi
+    echo "环境变量加载完成"
 }
 
 # Load environment variables
 load_env_file
 
+# 添加调试输出
+echo "Environment loaded, starting services..."
+
 # Unset HTTP proxies that might be set by Docker daemon
 export http_proxy=""; export https_proxy=""; export no_proxy=""; export HTTP_PROXY=""; export HTTPS_PROXY=""; export NO_PROXY=""
+echo "代理设置已清除"
+
 export PYTHONPATH=$(pwd)
+echo "PYTHONPATH设置为: $PYTHONPATH"
 
 export LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu/
-JEMALLOC_PATH=$(pkg-config --variable=libdir jemalloc)/libjemalloc.so
+echo "LD_LIBRARY_PATH设置为: $LD_LIBRARY_PATH"
 
-PY=python3
+JEMALLOC_PATH=$(pkg-config --variable=libdir jemalloc)/libjemalloc.so
+echo "JEMALLOC_PATH: $JEMALLOC_PATH"
+
+# 改为使用本地Python环境
+PY=.venv/bin/python
+echo "检查Python环境是否存在: $PY"
+if [ ! -f "$PY" ]; then
+    echo "错误: Python环境(.venv/bin/python)不存在，请先创建虚拟环境"
+    exit 1
+fi
 
 # Set default number of workers if WS is not set or less than 1
 if [[ -z "$WS" || $WS -lt 1 ]]; then
   WS=1
 fi
+
+# 添加调试输出
+echo "Using Python: $PY"
+echo "Workers: $WS"
 
 # Maximum number of retries for each task executor and server
 MAX_RETRIES=5
@@ -49,6 +76,7 @@ PIDS=()
 
 # Set the path to the NLTK data directory
 export NLTK_DATA="./nltk_data"
+echo "NLTK_DATA设置为: $NLTK_DATA"
 
 # Function to handle termination signals
 cleanup() {
@@ -66,14 +94,22 @@ cleanup() {
 
 # Trap SIGINT and SIGTERM to invoke cleanup
 trap cleanup SIGINT SIGTERM
+echo "信号处理器已设置"
 
 # Function to execute task_executor with retry logic
 task_exe(){
     local task_id=$1
     local retry_count=0
+    echo "准备启动task_executor，任务ID: $task_id"
     while ! $STOP && [ $retry_count -lt $MAX_RETRIES ]; do
         echo "Starting task_executor.py for task $task_id (Attempt $((retry_count+1)))"
-        LD_PRELOAD=$JEMALLOC_PATH $PY rag/svr/task_executor.py "$task_id"
+        if [ -n "$JEMALLOC_PATH" ] && [ -f "$JEMALLOC_PATH" ]; then
+            echo "使用jemalloc运行task_executor"
+            LD_PRELOAD=$JEMALLOC_PATH $PY rag/svr/task_executor.py "$task_id"
+        else
+            echo "jemalloc not found, running without preload"
+            $PY rag/svr/task_executor.py "$task_id"
+        fi
         EXIT_CODE=$?
         if [ $EXIT_CODE -eq 0 ]; then
             echo "task_executor.py for task $task_id exited successfully."
@@ -94,6 +130,7 @@ task_exe(){
 # Function to execute ragflow_server with retry logic
 run_server(){
     local retry_count=0
+    echo "准备启动ragflow_server"
     while ! $STOP && [ $retry_count -lt $MAX_RETRIES ]; do
         echo "Starting ragflow_server.py (Attempt $((retry_count+1)))"
         $PY api/ragflow_server.py
@@ -114,16 +151,20 @@ run_server(){
     fi
 }
 
+echo "开始启动任务执行器..."
 # Start task executors
 for ((i=0;i<WS;i++))
 do
+  echo "启动第 $i 个任务执行器"
   task_exe "$i" &
   PIDS+=($!)
 done
 
+echo "开始启动主服务器..."
 # Start the main server
 run_server &
 PIDS+=($!)
 
+echo "所有服务已启动，等待完成..."
 # Wait for all background processes to finish
 wait
